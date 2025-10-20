@@ -1,6 +1,7 @@
 //! Commit operation - execute trades at reserved prices
 
 use crate::state::SlabState;
+use crate::matching::antitoxic::{check_kill_band, is_jit_order, update_aggressor_ledger, calculate_arg_tax};
 use percolator_common::*;
 
 /// Commit result
@@ -38,10 +39,27 @@ pub fn commit(
     let instrument_idx = resv.instrument_idx;
     let side = resv.side;
     let slice_head = resv.slice_head;
+    let reservation_vwap = resv.vwap_px;
+
+    // Anti-toxicity: Kill band check
+    // Check if current price has moved too far from reservation price
+    let (current_price, current_epoch, batch_open_ms) = {
+        let instrument = slab
+            .get_instrument(instrument_idx)
+            .ok_or(PercolatorError::InvalidInstrument)?;
+
+        (instrument.index_price, instrument.epoch, instrument.batch_open_ms)
+    };
+
+    check_kill_band(
+        current_price,
+        reservation_vwap,
+        slab.header.kill_band_bps,
+    )?;
 
     // Execute all slices
     let (filled_qty, total_notional, total_fee) =
-        execute_slices(slab, slice_head, account_idx, instrument_idx, side, current_ts)?;
+        execute_slices(slab, slice_head, account_idx, instrument_idx, side, current_ts, current_epoch, batch_open_ms)?;
 
     // Calculate average price
     let avg_price = if filled_qty > 0 {
@@ -50,7 +68,23 @@ pub fn commit(
         0
     };
 
-    let total_debit = total_notional.saturating_add(total_fee);
+    // Anti-toxicity: Apply ARG tax if roundtrip detected
+    let arg_tax = calculate_arg_tax(
+        slab,
+        account_idx,
+        instrument_idx,
+        current_epoch,
+        slab.header.as_fee_k,
+    );
+
+    // Deduct ARG tax from taker account
+    if arg_tax > 0 {
+        if let Some(taker) = slab.get_account_mut(account_idx) {
+            taker.cash = taker.cash.saturating_sub(arg_tax as i128);
+        }
+    }
+
+    let total_debit = total_notional.saturating_add(total_fee).saturating_add(arg_tax);
 
     // Mark reservation as committed
     if let Some(resv) = slab.reservations.get_mut(resv_idx) {
@@ -76,6 +110,8 @@ fn execute_slices(
     instrument_idx: u16,
     side: Side,
     current_ts: u64,
+    current_epoch: u16,
+    batch_open_ms: u64,
 ) -> Result<(u64, u128, u128), PercolatorError> {
     let mut curr_slice_idx = slice_head;
     let mut total_qty = 0u64;
@@ -100,8 +136,9 @@ fn execute_slices(
 
         let maker_account_idx = order.account_idx;
         let price = order.price;
+        let order_created_ms = order.created_ms;
 
-        // Execute trade
+        // Execute trade and update ARG ledger
         execute_trade(
             slab,
             taker_account_idx,
@@ -112,12 +149,22 @@ fn execute_slices(
             price,
             order.order_id,
             current_ts,
+            current_epoch,
         )?;
 
         // Calculate fees
         let notional = mul_u64(qty, price);
-        let maker_fee_bps = slab.header.maker_fee;
         let taker_fee = calculate_fee(notional, slab.header.taker_fee as i64);
+
+        // Anti-toxicity: JIT penalty check for maker fee
+        let maker_fee_bps = if is_jit_order(order_created_ms, batch_open_ms, slab.header.jit_penalty_on) {
+            // JIT order - no rebate, only pay base fee
+            core::cmp::max(slab.header.maker_fee, 0)
+        } else {
+            // Normal maker - eligible for rebate
+            slab.header.maker_fee
+        };
+
         let maker_fee = calculate_fee(notional, maker_fee_bps);
 
         total_qty = total_qty.saturating_add(qty);
@@ -162,6 +209,7 @@ fn execute_trade(
     price: u64,
     maker_order_id: u64,
     current_ts: u64,
+    current_epoch: u16,
 ) -> Result<(), PercolatorError> {
     // Get cum_funding before any mutable borrows
     let cum_funding = slab
@@ -192,6 +240,18 @@ fn execute_trade(
         maker_qty,
         price,
         cum_funding,
+    )?;
+
+    // Anti-toxicity: Update aggressor ledger for ARG tracking
+    // This tracks taker's activity to detect roundtrip patterns
+    update_aggressor_ledger(
+        slab,
+        taker_account_idx,
+        instrument_idx,
+        side,
+        qty,
+        price,
+        current_epoch,
     )?;
 
     // Record trade
