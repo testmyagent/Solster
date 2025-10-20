@@ -8,8 +8,9 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::RouterInstruction;
-use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw};
+use crate::state::Vault;
+use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
 
@@ -43,27 +44,27 @@ pub fn process_instruction(
     match instruction {
         RouterInstruction::Initialize => {
             msg!("Instruction: Initialize");
-            process_initialize(program_id, accounts, &instruction_data[1..])
+            process_initialize_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::Deposit => {
             msg!("Instruction: Deposit");
-            process_deposit(program_id, accounts, &instruction_data[1..])
+            process_deposit_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::Withdraw => {
             msg!("Instruction: Withdraw");
-            process_withdraw(program_id, accounts, &instruction_data[1..])
+            process_withdraw_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::MultiReserve => {
             msg!("Instruction: MultiReserve");
-            process_multi_reserve(program_id, accounts, &instruction_data[1..])
+            process_multi_reserve_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::MultiCommit => {
             msg!("Instruction: MultiCommit");
-            process_multi_commit(program_id, accounts, &instruction_data[1..])
+            process_multi_commit_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::Liquidate => {
             msg!("Instruction: Liquidate");
-            process_liquidate(program_id, accounts, &instruction_data[1..])
+            process_liquidate_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -75,7 +76,9 @@ pub fn process_instruction(
 /// Expected accounts:
 /// 0. `[writable]` Registry account
 /// 1. `[signer]` Authority/payer
-fn process_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+///
+/// Expected data layout: TBD
+fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 1 {
         msg!("Error: Initialize instruction requires at least 1 account");
         return Err(PercolatorError::InvalidInstruction.into());
@@ -99,9 +102,12 @@ fn process_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 /// 1. `[writable]` User token account
 /// 2. `[signer]` User authority
 /// 3. `[]` Token program
-fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: Deposit instruction requires at least 2 accounts");
+///
+/// Expected data layout (16 bytes):
+/// - amount: u128 (16 bytes)
+fn process_deposit_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 1 {
+        msg!("Error: Deposit instruction requires at least 1 account");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -109,10 +115,16 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     validate_owner(vault_account, program_id)?;
     validate_writable(vault_account)?;
 
-    // TODO: Parse amount from data and process deposit
-    let _ = data;
+    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
 
-    msg!("Deposit instruction validated - implementation pending");
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let amount = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_deposit(vault, amount)?;
+
+    msg!("Deposit processed successfully");
     Ok(())
 }
 
@@ -123,9 +135,12 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
 /// 1. `[writable]` User token account
 /// 2. `[signer]` User authority
 /// 3. `[]` Token program
-fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: Withdraw instruction requires at least 2 accounts");
+///
+/// Expected data layout (16 bytes):
+/// - amount: u128 (16 bytes)
+fn process_withdraw_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 1 {
+        msg!("Error: Withdraw instruction requires at least 1 account");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -133,10 +148,16 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
     validate_owner(vault_account, program_id)?;
     validate_writable(vault_account)?;
 
-    // TODO: Parse amount from data and process withdrawal
-    let _ = data;
+    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
 
-    msg!("Withdraw instruction validated - implementation pending");
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let amount = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_withdraw(vault, amount)?;
+
+    msg!("Withdraw processed successfully");
     Ok(())
 }
 
@@ -146,7 +167,9 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
 /// 0. `[writable]` Portfolio account
 /// 1. `[signer]` User authority
 /// 2..N. `[writable]` Slab accounts
-fn process_multi_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+///
+/// Expected data layout: TBD (Phase 4 work)
+fn process_multi_reserve_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 2 {
         msg!("Error: MultiReserve instruction requires at least 2 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
@@ -157,6 +180,7 @@ fn process_multi_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
     validate_writable(portfolio_account)?;
 
     // TODO: Parse reserve parameters and coordinate multi-slab reserves
+    // This is Phase 4 work - multi-slab coordination
     let _ = data;
 
     msg!("MultiReserve instruction validated - implementation pending");
@@ -169,7 +193,9 @@ fn process_multi_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 /// 0. `[writable]` Portfolio account
 /// 1. `[signer]` User authority
 /// 2..N. `[writable]` Slab accounts
-fn process_multi_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+///
+/// Expected data layout: TBD (Phase 4 work)
+fn process_multi_commit_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 2 {
         msg!("Error: MultiCommit instruction requires at least 2 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
@@ -180,6 +206,7 @@ fn process_multi_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u
     validate_writable(portfolio_account)?;
 
     // TODO: Parse commit parameters and coordinate multi-slab commits
+    // This is Phase 4 work - atomic multi-slab execution
     let _ = data;
 
     msg!("MultiCommit instruction validated - implementation pending");
@@ -193,7 +220,9 @@ fn process_multi_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u
 /// 1. `[signer]` Liquidator
 /// 2. `[writable]` Liquidatee account
 /// 3..N. `[writable]` Slab accounts
-fn process_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+///
+/// Expected data layout: TBD (Phase 4 work)
+fn process_liquidate_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 3 {
         msg!("Error: Liquidate instruction requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
@@ -204,6 +233,7 @@ fn process_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
     validate_writable(portfolio_account)?;
 
     // TODO: Parse liquidation parameters and coordinate liquidation
+    // This is Phase 4 work - cross-slab liquidation
     let _ = data;
 
     msg!("Liquidate instruction validated - implementation pending");
