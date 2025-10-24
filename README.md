@@ -1,4 +1,4 @@
-# Percolator
+# Solster
 
 A sharded perpetual exchange protocol for Solana, implementing the design from `plan.md`.
 
